@@ -404,12 +404,10 @@ class Qwen3MoeDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
-        torch.save(hidden_states.cpu(), '/home/ascend-vllm/mindspeed_vllm_tensor/before_attn_vllm.pt')
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
-        torch.save(hidden_states.cpu(), '/home/ascend-vllm/mindspeed_vllm_tensor/attn_vllm.pt')
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
