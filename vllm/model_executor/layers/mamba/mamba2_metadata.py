@@ -25,6 +25,7 @@ class Mamba2Metadata:
 
 def get_platform_metadata_classes() -> tuple[type[AttentionMetadata], ...]:
     """Returns the appropriate metadata classes for the current platform."""
+    from vllm_ascend.platform import NPUPlatform
     if current_platform.is_rocm():
         from vllm.attention.backends.rocm_flash_attn import (
             ROCmFlashAttentionMetadata)
@@ -34,6 +35,10 @@ def get_platform_metadata_classes() -> tuple[type[AttentionMetadata], ...]:
         from vllm.attention.backends.xformers import XFormersMetadata
         return (FlashAttentionMetadata, XFormersMetadata,
                 PlaceholderAttentionMetadata)
+    
+    elif isinstance(current_platform, NPUPlatform):
+        from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+        return AscendCommonAttentionMetadata
     raise ValueError(
         f"Unsupported platform for Mamba2: {current_platform.device_type}")
 
