@@ -317,24 +317,35 @@ class Qwen3MoeAttention(nn.Module):
         k_by_head = self.k_norm(k_by_head)
         k = k_by_head.view(k.shape)
 
-        # q, k = self.rotary_emb(positions, q, k)
+        q, k = self.rotary_emb(positions, q, k)
 
-        # rotary_seq_len = inference_params.max_sequence_length
-        rotary_seq_len = 4096
-        rotary_pos_emb = rotary_embedding_forward(q.device, rotary_seq_len) ### !!! device
-        rotary_pos_emb = (rotary_pos_emb,) * 2
-        rotary_pos_emb_adjust = adjust_rotary_embedding(rotary_pos_emb, q.shape[0])
-        q_pos_emb, k_pos_emb = rotary_pos_emb_adjust
-        if get_tensor_model_parallel_rank() == 0:
-            a = 1
-        q = apply_rotary_pos_emb_bshd(
-                q,
-                q_pos_emb,
-            )
-        k = apply_rotary_pos_emb_bshd(
-                k,
-                k_pos_emb,
-            )
+        # # rotary_seq_len = inference_params.max_sequence_length
+        # rotary_seq_len = 4096
+        # rotary_pos_emb = rotary_embedding_forward(q.device, rotary_seq_len) ### !!! device
+        # rotary_pos_emb = (rotary_pos_emb,) * 2
+        # rotary_pos_emb_adjust = adjust_rotary_embedding(rotary_pos_emb, q.shape[0])
+
+        # # from vllm.forward_context import get_forward_context
+        # # attn_metadata = get_forward_context().attn_metadata
+        # # is_first_step = attn_metadata.num_prefills > 0
+
+        # # if is_first_step:
+        # #     rotary_pos_emb_adjust = adjust_rotary_embedding(rotary_pos_emb, q.shape[0])
+        # # else:
+        # #     rotary_pos_emb_adjust = adjust_rotary_embedding(rotary_pos_emb, positions[-1] + 1) 
+
+
+        # q_pos_emb, k_pos_emb = rotary_pos_emb_adjust
+        # if get_tensor_model_parallel_rank() == 0:
+        #     a = 1
+        # q = apply_rotary_pos_emb_bshd(
+        #         q,
+        #         q_pos_emb,
+        #     )
+        # k = apply_rotary_pos_emb_bshd(
+        #         k,
+        #         k_pos_emb,
+        #     )
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
