@@ -1273,6 +1273,14 @@ class ModelConfig:
                                    for t in layers_block_type_value[start:end])
                     else:
                         return self.get_num_layers(parallel_config)
+                elif hasattr(self.hf_text_config,
+                           "mamba_model_type") and (self.hf_text_config.model_type
+                                              == "qwen3_moe"):
+                    if attn_block_type:
+                        return sum(t == "attn"
+                                   for t in layers_block_type_value[start:end])
+                    else:
+                        return self.get_num_layers(parallel_config)    
                 return sum(t == block_type.value
                            for t in layers_block_type_value[start:end])
 

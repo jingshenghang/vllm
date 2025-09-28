@@ -58,6 +58,90 @@ from .utils import (AutoWeightsLoader, extract_layer_index,
 
 logger = init_logger(__name__)
 
+from torch import Tensor, nn
+from vllm.distributed import (
+    divide, get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank,
+    tensor_model_parallel_all_gather, tensor_model_parallel_all_reduce)
+
+def _rotate_half(x: Tensor, rotary_interleaved: bool) -> Tensor:
+    """Change sign so the last dimension becomes [-odd, +even]
+    Args:
+        x (Tensor): Input tensor
+    Returns:
+        Tensor: Tensor rotated half
+    """
+    if not rotary_interleaved:
+        x1, x2 = torch.chunk(x, 2, dim=-1)
+        return torch.cat((-x2, x1), dim=-1)
+    else:
+        x1 = x[:, :, :, ::2]
+        x2 = x[:, :, :, 1::2]
+        x_new = torch.stack((-x2, x1), dim=-1)
+        return x_new.view(x_new.shape[0], x_new.shape[1], x_new.shape[2], -1)
+    
+def apply_rotary_pos_emb_bshd(t: Tensor, freqs: Tensor, rotary_interleaved: bool = False) -> Tensor:
+    from einops import rearrange
+    t_shape = t.shape
+    t = rearrange(t, "s (h d) -> s 1 h d", d=128) # tp=2
+    # d_per_tp = t_shape[-1] // tp_size  # 每个TP分片负责的维度
+    # t = rearrange(t, "s (h d) -> s 1 h d", d=d_per_tp // (t_shape[-1] // (d_per_tp * tp_size)))
+    _mscale = 1
+    rot_dim = freqs.shape[-1]
+    t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
+    cos_ = (torch.cos(freqs) * _mscale).to(t.dtype)
+    sin_ = (torch.sin(freqs) * _mscale).to(t.dtype)
+    t = (t * cos_) + (_rotate_half(t, rotary_interleaved) * sin_)
+    return torch.cat((t, t_pass), dim=-1).view(t_shape)
+    
+
+
+def rotary_embedding_forward(device, max_seq_len: int, offset: int = 0):
+
+    inv_freq = torch.load('/home/ascend-vllm/mindspeed_vllm_tensor/inv_freq_mindspeed.pt').to(device)
+    
+
+    # tp_rank = get_tensor_model_parallel_rank()
+    # tp_size = get_tensor_model_parallel_world_size()
+
+    # # 2. 按TP切分inv_freq（每个分片只保留自己负责的部分）
+    # rot_dim_total = inv_freq.shape[0] * 2  # 总旋转维度（原代码中通过cat翻倍）
+    # # rot_dim_total = inv_freq.shape[0]  # 总旋转维度（原代码中通过cat翻倍）
+    # rot_dim_per_tp = rot_dim_total // tp_size  # 每个TP分片的旋转维度
+    # inv_freq = inv_freq[tp_rank * (rot_dim_per_tp // 2) : (tp_rank + 1) * (rot_dim_per_tp // 2)]
+
+    seq = (torch.arange(max_seq_len, device=inv_freq.device, dtype=inv_freq.dtype)+ offset)
+    freqs = torch.outer(seq, inv_freq)
+    emb = torch.cat((freqs, freqs), dim=-1)
+    emb = emb[:, None, None, :]
+    return emb
+
+def adjust_rotary_embedding(rotary_pos_emb, sequence_end):
+    # adjust the key rotary positional embedding
+
+    from vllm.forward_context import get_forward_context
+    attn_metadata = get_forward_context().attn_metadata
+    is_first_step = attn_metadata.num_prefills > 0
+
+    if rotary_pos_emb is not None:
+        q_pos_emb, k_pos_emb = rotary_pos_emb
+        # need to cross check this condition during inference
+        # if not set_inference_key_value_memory:
+        if not is_first_step:
+            # In inference, we compute one token at a time.
+            # Select the correct positional embedding
+            # (only the last token in the sequence)
+            q_pos_emb = q_pos_emb[sequence_end - 1 : sequence_end]
+        else:
+            # In the first forward pass of inference,
+            # we use the entire provided prefix.
+            # q_pos_emb here has the rope embeddings of the entire
+            # prefix + to-be-generated output so
+            # we slice to just the prefix.
+            q_pos_emb = q_pos_emb[:sequence_end, :, :, :]
+        k_pos_emb = k_pos_emb[:sequence_end, :, :, :]
+        rotary_pos_emb = (q_pos_emb, k_pos_emb)
+    return rotary_pos_emb
+
 
 class Qwen3MoeMLP(nn.Module):
 
@@ -133,7 +217,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = self.experts(hidden_states=hidden_states,
+        final_hidden_states, *_ = self.experts(hidden_states=hidden_states,
                                            router_logits=router_logits)
         final_hidden_states = final_hidden_states
         if self.tp_size > 1:
@@ -232,7 +316,36 @@ class Qwen3MoeAttention(nn.Module):
                            self.head_dim)
         k_by_head = self.k_norm(k_by_head)
         k = k_by_head.view(k.shape)
+
         q, k = self.rotary_emb(positions, q, k)
+
+        # # rotary_seq_len = inference_params.max_sequence_length
+        # rotary_seq_len = 4096
+        # rotary_pos_emb = rotary_embedding_forward(q.device, rotary_seq_len) ### !!! device
+        # rotary_pos_emb = (rotary_pos_emb,) * 2
+        # rotary_pos_emb_adjust = adjust_rotary_embedding(rotary_pos_emb, q.shape[0])
+
+        # # from vllm.forward_context import get_forward_context
+        # # attn_metadata = get_forward_context().attn_metadata
+        # # is_first_step = attn_metadata.num_prefills > 0
+
+        # # if is_first_step:
+        # #     rotary_pos_emb_adjust = adjust_rotary_embedding(rotary_pos_emb, q.shape[0])
+        # # else:
+        # #     rotary_pos_emb_adjust = adjust_rotary_embedding(rotary_pos_emb, positions[-1] + 1) 
+
+
+        # q_pos_emb, k_pos_emb = rotary_pos_emb_adjust
+        # if get_tensor_model_parallel_rank() == 0:
+        #     a = 1
+        # q = apply_rotary_pos_emb_bshd(
+        #         q,
+        #         q_pos_emb,
+        #     )
+        # k = apply_rotary_pos_emb_bshd(
+        #         k,
+        #         k_pos_emb,
+        #     )
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output

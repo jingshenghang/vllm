@@ -230,7 +230,9 @@ def _bmm_chunk_fwd(a,
         chunk_size, META['BLOCK_SIZE_M']) * triton.cdiv(
             chunk_size, META['BLOCK_SIZE_N']), batch, nchunks
                          if not has_groups else nchunks * ngroups)
-    with torch.cuda.device(a.device.index):
+    import torch_npu
+    with torch_npu.npu.device(a.device.index):
+    # with torch.cuda.device(a.device.index):
         _bmm_chunk_fwd_kernel[grid](
             a,
             b,
